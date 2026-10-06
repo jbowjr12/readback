@@ -100,7 +100,10 @@ mark.w { background: var(--word); color: var(--word-ink); border-radius: 2px; pa
 .tip span { min-width: 0; }
 .lib-open.remote { background: transparent; border-style: dashed; }
 .notice { max-width: 68ch; margin: 0 auto 20px; display: flex; gap: 12px; align-items: flex-start; justify-content: space-between; padding: 12px 14px; border: 1px solid var(--line); border-left: 3px solid var(--danger); border-radius: 8px; background: var(--surface); }
-.notice span { min-width: 0; }
+.notice > span:first-child { min-width: 0; }
+.notice-actions { display: flex; gap: 6px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
+.skip-float { position: fixed; z-index: 35; padding: 7px 14px; border-radius: 999px; border: none; background: var(--ink); color: var(--bg); font-weight: 600; font-size: 13px; cursor: pointer; box-shadow: 0 4px 14px rgba(0,0,0,0.18); }
+.skip-float:hover { filter: brightness(1.15); }
 
 /* Player */
 .player { position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; background: var(--surface); border-top: 1px solid var(--line); box-shadow: var(--shadow); padding: 10px 16px calc(12px + env(safe-area-inset-bottom, 0px)); }
@@ -222,7 +225,7 @@ a.btn { text-decoration: none; }
 <main class="wrap">
   <div id="notice" class="notice" role="alert" hidden>
     <span id="noticeText"></span>
-    <button id="noticeClose" class="btn ghost small" type="button">Dismiss</button>
+    <span class="notice-actions"><button id="noticeAction" class="btn small" type="button" hidden></button><button id="noticeClose" class="btn ghost small" type="button">Dismiss</button></span>
   </div>
   <article class="doc">
     <div class="doc-head">
@@ -239,6 +242,7 @@ a.btn { text-decoration: none; }
 </main>
 
 <button id="follow" class="follow" type="button" hidden>Back to current sentence</button>
+<button id="skipBtn" class="skip-float" type="button" hidden>Don&rsquo;t read this</button>
 
 <div id="player" class="player">
   <div class="player-inner">
@@ -363,7 +367,7 @@ a.btn { text-decoration: none; }
     file: $('#file'), openBtn: $('#openBtn'), libBtn: $('#libBtn'), libCount: $('#libCount'),
     drawer: $('#drawer'), backdrop: $('#backdrop'), libList: $('#libList'), libClose: $('#libClose'),
     loading: $('#loading'), loadName: $('#loadName'), loadBar: $('#loadBar'), loadText: $('#loadText'),
-    notice: $('#notice'), noticeText: $('#noticeText'), noticeClose: $('#noticeClose'),
+    notice: $('#notice'), noticeText: $('#noticeText'), noticeClose: $('#noticeClose'), noticeAction: $('#noticeAction'), skipBtn: $('#skipBtn'),
     follow: $('#follow'), drop: $('#drop'), smaller: $('#smaller'), bigger: $('#bigger'), player: $('#player'),
     voiceTip: $('#voiceTip'), voiceTipClose: $('#voiceTipClose'), syncNote: $('#syncNote'), installBtn: $('#installBtn'),
     notesBtn: $('#notesBtn'), notesCount: $('#notesCount'), notesDrawer: $('#notesDrawer'), notesClose: $('#notesClose'), notesList: $('#notesList'), notesSub: $('#notesSub'),
@@ -498,7 +502,9 @@ a.btn { text-decoration: none; }
     for (let p = 1; p <= N; p++) {
       const page = await pdf.getPage(p);
       const tc = await page.getTextContent();
-      pages.push(toLines(tc.items));
+      const v = page.view || [0, 0, 612, 792];
+      const H = Math.max(1, v[3] - v[1]);
+      pages.push(toLines(tc.items).map((l) => ({ text: l.text, y: l.y, h: l.h, r: Math.round(((l.y - v[1]) / H) * 1000) / 1000 })));
       page.cleanup();
       onProgress(p, N);
       if (p % 5 === 0) await new Promise((r) => setTimeout(r, 0));
@@ -533,30 +539,117 @@ a.btn { text-decoration: none; }
       .filter((l) => l.text);
   }
 
-  function stripRepeats(pages) {
+  function lineKey(t) { return t.toLowerCase().replace(/\d+/g, '#').replace(/[^a-z#]+/g, ''); }
+  function inMargin(l, i, n) {
+    if (typeof l.r === 'number') return l.r > 0.86 || l.r < 0.12;
+    return i < 3 || i >= n - 3;
+  }
+  // Running headers (author, title) and footers (citations, page numbers) repeat near the top or bottom edge of many pages.
+  function stripRepeats(pages, skips) {
     const N = pages.length;
-    const norm = (t) => t.toLowerCase().replace(/\d+/g, '#').replace(/\s+/g, ' ').trim();
-    const pageNum = /^(page\s*)?#(\s*(of|\/)\s*#)?$/;
-    const counts = new Map();
-    if (N >= 4) {
-      for (const lines of pages) {
-        const seen = new Set();
-        for (const l of [...lines.slice(0, 2), ...lines.slice(-2)]) {
-          const k = norm(l.text);
-          if (k.length > 90 || seen.has(k)) continue;
-          seen.add(k);
-          counts.set(k, (counts.get(k) || 0) + 1);
-        }
-      }
+    const pageNum = /^(page)?#((of|\/)?#)?$/;
+    const full = new Map(), head = new Map();
+    const bump = (m, k) => m.set(k, (m.get(k) || 0) + 1);
+    for (const lines of pages) {
+      const seenF = new Set(), seenH = new Set();
+      lines.forEach((l, i) => {
+        if (!inMargin(l, i, lines.length)) return;
+        const k = lineKey(l.text);
+        if (!k || k.length > 240) return;
+        if (!seenF.has(k)) { seenF.add(k); bump(full, k); }
+        const h = k.slice(0, 24);
+        if (h.length >= 14 && !seenH.has(h)) { seenH.add(h); bump(head, h); }
+      });
     }
-    const thresh = Math.max(3, Math.ceil(N * 0.3));
+    const thresh = N >= 4 ? Math.max(3, Math.ceil(N * 0.2)) : 2;
+    const sk = (skips || []).filter((x) => x && x.length >= 4);
     return pages.map((lines) => lines.filter((l, i) => {
-      if (i >= 2 && i < lines.length - 2) return true;
-      const k = norm(l.text);
-      if (pageNum.test(k) || /^[ivxlc]{1,6}$/.test(l.text)) return false;
-      if (N >= 4 && (counts.get(k) || 0) >= thresh) return false;
+      const k = lineKey(l.text);
+      if (sk.some((x) => k.includes(x) && k.length <= x.length * 1.5 + 12)) return false;
+      if (!inMargin(l, i, lines.length)) return true;
+      if (!k || pageNum.test(k) || /^[ivxlc]{1,6}$/i.test(l.text.trim())) return false;
+      if (N >= 2 && (full.get(k) || 0) >= thresh) return false;
+      const h = k.slice(0, 24);
+      if (N >= 2 && h.length >= 14 && (head.get(h) || 0) >= thresh) return false;
       return true;
     }));
+  }
+
+  function makeDoc(id, name, raw, N, skips, added) {
+    const doc = buildDoc(id, name, buildParas(stripRepeats(raw, skips)), N, { v: 2, raw, skips: skips || [] });
+    if (added) doc.added = added;
+    return doc;
+  }
+
+  // Finds where a sentence from an older version of a document landed in a rebuilt one.
+  function remapIndex(oldDoc, oldI, newDoc) {
+    if (!oldDoc || !newDoc.units.length || oldI <= 0) return 0;
+    oldI = Math.min(oldI, oldDoc.units.length - 1);
+    const pg = oldDoc.unitPage[oldI];
+    const norm = (t) => t.toLowerCase().replace(/[^a-z0-9]+/g, '');
+    const t = norm(oldDoc.units[oldI] || '');
+    const first = t.slice(0, 25), last = t.slice(-25);
+    let best = -1, score = -1e9;
+    for (let i = 0; i < newDoc.units.length; i++) {
+      const p = newDoc.unitPage[i];
+      if (p < pg - 1) continue;
+      if (p > pg + 1) break;
+      const n = norm(newDoc.units[i]);
+      let sc;
+      if (first.length >= 10 && n.includes(first)) sc = 1000;
+      else if (last.length >= 10 && n.includes(last)) sc = 900;
+      else if (last.length >= 10 && last.includes(n.slice(-12)) && n.length >= 12) sc = 500;
+      else { let k = 0; while (k < t.length && k < n.length && t[k] === n[k]) k++; sc = k; }
+      sc -= Math.abs(p - pg) * 5;
+      if (sc > score) { score = sc; best = i; }
+    }
+    if (best < 0) { best = newDoc.unitPage.findIndex((p) => p >= pg); if (best < 0) best = newDoc.units.length - 1; }
+    return best;
+  }
+
+  // Swaps in a rebuilt version of the open document, carrying over the reading position and notes.
+  async function adoptRebuilt(oldDoc, newDoc) {
+    const posOld = state.doc && state.doc.id === oldDoc.id ? state.idx : localPos(oldDoc.id).i;
+    lsSet('rb:pos:' + newDoc.id, { i: remapIndex(oldDoc, posOld, newDoc), t: Date.now() });
+    const oldNotes = lsGet('rb:notes:' + oldDoc.id, []);
+    if (Array.isArray(oldNotes) && oldNotes.length) {
+      const merged = new Map();
+      for (const n of oldNotes) {
+        const i = remapIndex(oldDoc, n.i, newDoc);
+        const prev = merged.get(i);
+        merged.set(i, prev ? { i, text: prev.text + '\n\n' + n.text, t: Math.max(prev.t || 0, n.t || 0) } : { i, text: n.text, t: n.t });
+      }
+      lsSet('rb:notes:' + newDoc.id, [...merged.values()].sort((a, b) => a.i - b.i));
+    }
+    const ok = await saveDoc(newDoc);
+    showDoc(newDoc);
+    refreshLibrary();
+    return ok;
+  }
+
+  async function addSkip(text, undoKey) {
+    const d = state.doc;
+    if (!d || d.sample || !d.raw) return;
+    let skips;
+    if (undoKey) skips = (d.skips || []).filter((x) => x !== undoKey);
+    else {
+      const key = lineKey(text);
+      if (key.length < 4) { notify('Select a little more of the text you want skipped.'); return; }
+      if ((d.skips || []).includes(key)) return;
+      skips = [...(d.skips || []), key];
+    }
+    const nd = makeDoc(d.id, d.name, d.raw, d.pageCount, skips, d.added);
+    if (!undoKey && nd.units.join(' ').length === d.units.join(' ').length) {
+      notify('Nothing was skipped. This only works on whole lines like a running header or footer, so select the entire line and try again.');
+      return;
+    }
+    if (state.playing) pause();
+    await adoptRebuilt(d, nd);
+    if (undoKey) notify('Done. That text will be read again.');
+    else {
+      const key = skips[skips.length - 1];
+      notify('Done. Lines matching “' + text.trim().slice(0, 60) + (text.trim().length > 60 ? '…' : '') + '” won’t be read in this PDF.', 'Undo', () => addSkip('', key));
+    }
   }
 
   function median(a) { if (!a.length) return 0; const s = [...a].sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; }
@@ -657,6 +750,7 @@ a.btn { text-decoration: none; }
       'Your place is saved automatically. Every PDF you open is kept in your Library, so you can close the app and pick up exactly where you stopped. Nothing is uploaded anywhere. The file stays on your computer.',
       'To leave yourself a note, press the Note button (or the N key) while a sentence is being read. The sentence gets a small pin you can click, and the Notes button at the top lists every note so you can jump back to it.',
       'To take the reading with you, press Make MP3 and choose how much to record, from ten minutes to an hour. It starts at the highlighted sentence and saves an audio file you can play anywhere.',
+      'If a page header, footer, or citation still gets read aloud, select that text with your mouse and click Don\u2019t read this. Lines like it are skipped for the rest of that PDF.',
       'The voice is a natural-sounding model that runs right on this computer. The first time you press play it downloads once, which can take a minute. To try a different voice, open the voice menu; choosing one plays a short sample. Speed goes from slow and careful to twice as fast.',
       'Scanned pages, which are pictures of text rather than text itself, can’t be read yet.'
     ].map((t) => ({ text: t, marks: [[0, 1]] }));
@@ -1123,6 +1217,9 @@ a.btn { text-decoration: none; }
     state.follow = true; els.follow.hidden = true;
     if (start === 0) window.scrollTo({ top: 0, behavior: 'auto' });
     setActive(start, { scroll: start > 0, instant: true, restore: true });
+    if (!doc.sample && !doc.v) {
+      notify('This PDF was opened before page headers and footers were cleaned up, so they may be read aloud. Open the PDF file again to fix it. Your place and notes will carry over.', 'Open PDF', () => els.file.click());
+    }
     if (!doc.sample) {
       lsSet('rb:last', doc.id);
       scheduleCloud(true);
@@ -1137,7 +1234,7 @@ a.btn { text-decoration: none; }
     if (!/\.pdf$/i.test(file.name) && file.type !== 'application/pdf') { notify('“' + file.name + '” isn’t a PDF. Choose a file that ends in .pdf.'); return; }
     const id = file.name + ':' + file.size;
     const existing = (await loadDoc(id)) || (await loadDoc(id + ':' + file.lastModified));
-    if (existing) { showDoc(existing); return; }
+    if (existing && existing.v >= 2) { showDoc(existing); return; }
     if (!window.pdfjsLib) { notify('The PDF reader didn’t load. Check your internet connection and reload the page.'); return; }
     if (state.playing) pause();
     showLoading(file.name);
@@ -1147,11 +1244,17 @@ a.btn { text-decoration: none; }
         els.loadText.textContent = 'Reading page ' + p + ' of ' + n;
       });
       els.loadText.textContent = 'Arranging the text';
-      const doc = buildDoc(id, file.name, buildParas(stripRepeats(pages)), N);
+      const doc = makeDoc(existing ? existing.id : id, file.name, pages, N, existing && existing.skips, existing && existing.added);
       const chars = doc.units.reduce((a, t) => a + t.length, 0);
       if (chars < Math.max(40, N * 15)) {
         hideLoading();
         notify('“' + cleanName(file.name) + '” has no readable text. It’s most likely a scan, meaning pictures of pages, which Emma’s Ears can’t read yet.');
+        return;
+      }
+      if (existing) {
+        hideLoading();
+        await adoptRebuilt(existing, doc);
+        notify('Cleaned up: page headers and footers are now skipped. Your place and notes carried over.');
         return;
       }
       const ok = await saveDoc(doc);
@@ -1169,7 +1272,15 @@ a.btn { text-decoration: none; }
 
   function showLoading(name) { els.loadName.textContent = cleanName(name); els.loadBar.style.width = '0%'; els.loadText.textContent = 'Starting'; els.loading.hidden = false; }
   function hideLoading() { els.loading.hidden = true; }
-  function notify(msg) { els.noticeText.textContent = msg; els.notice.hidden = false; window.scrollTo({ top: 0, behavior: 'auto' }); }
+  let noticeFn = null;
+  function notify(msg, actionLabel, fn) {
+    els.noticeText.textContent = msg;
+    noticeFn = fn || null;
+    els.noticeAction.hidden = !fn;
+    els.noticeAction.textContent = actionLabel || '';
+    els.notice.hidden = false;
+    window.scrollTo({ top: 0, behavior: 'auto' });
+  }
   function hideNotice() { els.notice.hidden = true; }
 
   /* ---------- library ---------- */
@@ -1530,6 +1641,32 @@ a.btn { text-decoration: none; }
   els.libClose.addEventListener('click', closeDrawer);
   els.backdrop.addEventListener('click', () => { closeDrawer(); closeNotes(); });
   els.noticeClose.addEventListener('click', hideNotice);
+  els.noticeAction.addEventListener('click', () => { const f = noticeFn; hideNotice(); if (f) f(); });
+
+  /* ---------- select text, then choose not to read it ---------- */
+  let skipTimer = null;
+  function placeSkipBtn() {
+    const sel = window.getSelection && window.getSelection();
+    const d = state.doc;
+    const text = sel ? String(sel).trim() : '';
+    if (!d || d.sample || !d.raw || text.length < 3 || text.length > 400 || !sel.rangeCount || !els.reader.contains(sel.anchorNode)) { els.skipBtn.hidden = true; return; }
+    const r = sel.getRangeAt(0).getBoundingClientRect();
+    els.skipBtn.hidden = false;
+    const bw = els.skipBtn.offsetWidth, vw = window.innerWidth;
+    els.skipBtn.style.left = Math.max(8, Math.min(vw - bw - 8, r.left + r.width / 2 - bw / 2)) + 'px';
+    const below = r.bottom + 8, above = r.top - els.skipBtn.offsetHeight - 8;
+    els.skipBtn.style.top = (above > 60 ? above : below) + 'px';
+    els.skipBtn.dataset.text = text;
+  }
+  document.addEventListener('selectionchange', () => { clearTimeout(skipTimer); skipTimer = setTimeout(placeSkipBtn, 120); });
+  window.addEventListener('scroll', () => { if (!els.skipBtn.hidden) placeSkipBtn(); }, { passive: true });
+  els.skipBtn.addEventListener('mousedown', (e) => e.preventDefault());
+  els.skipBtn.addEventListener('click', () => {
+    const t = els.skipBtn.dataset.text || '';
+    els.skipBtn.hidden = true;
+    const sel = window.getSelection && window.getSelection(); if (sel) sel.removeAllRanges();
+    addSkip(t);
+  });
   els.voiceTipClose.addEventListener('click', () => { els.voiceTip.hidden = true; lsSet('rb:tipDone', true); });
   els.follow.addEventListener('click', () => { state.follow = true; els.follow.hidden = true; const el = state.spans[state.idx]; if (el) ensureVisible(el); });
 

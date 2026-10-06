@@ -1,5 +1,5 @@
 // Keeps Emma’s Ears working offline once it has been opened.
-const CACHE = 'readback-v4';
+const CACHE = 'readback-v5';
 const SHELL = ['./', 'index.html', 'worker.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png'];
 // Versioned library files (PDF reader, voice engine, fonts) never change, so they are served from cache first.
 const LIB_HOSTS = ['cdnjs.cloudflare.com', 'cdn.jsdelivr.net', 'fonts.googleapis.com', 'fonts.gstatic.com'];
